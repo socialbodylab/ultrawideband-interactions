@@ -17,17 +17,17 @@ Libraries needed:
 #include <Arduino.h>
 
 // Define tag ID
-#define UWB_INDEX 0
+#define UWB_INDEX 7
 
 // System configuration
-#define UWB_TAG_COUNT 64
+#define UWB_TAG_COUNT 10
 #define DISPLAY_UPDATE_INTERVAL 50  // Update display every 100ms
 
 // Data request rate in milliseconds
 unsigned long refreshRate = 50;  // Request range data every 500ms
 
 // Position filtering configuration
-#define POSITION_HISTORY_LENGTH 5  // Number of positions to average
+#define POSITION_HISTORY_LENGTH 1  // Number of positions to average
 
 // ESP32S3 pins
 #define RESET 16
