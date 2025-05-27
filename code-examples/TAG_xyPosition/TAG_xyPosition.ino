@@ -11,6 +11,9 @@ Libraries needed:
 - Adafruit_SSD1306 (2.5.7)
 */
 
+// Uncomment to enable detailed debug logging
+// #define DEBUG_MODE
+
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -192,14 +195,17 @@ void loop()
     }
     
     // Request range data periodically based on refreshRate
-    static long last_range_request = 0;
-    if (millis() - last_range_request > refreshRate) {
+    static unsigned long last_range_request = 0;
+    unsigned long currentTime = millis();
+    if (currentTime - last_range_request > refreshRate) {
+        #ifdef DEBUG_MODE
         SERIAL_LOG.println(F("Requesting range data..."));
+        #endif
         
         // Request all ranges at once
         sendData("AT+RANGE", 100, 1);
         
-        last_range_request = millis();
+        last_range_request = currentTime;
     }
 }
 
@@ -214,39 +220,46 @@ void parseRangeData(String data) {
         // Find the end of the range array
         int range_end = data.indexOf(")", range_start);
         if (range_end > range_start) {
-            // Extract just the range values
-            String range_values = data.substring(range_start + 7, range_end);
-            SERIAL_LOG.print(F("Range values: "));
-            SERIAL_LOG.println(range_values);
-            
-            // Split the range values by commas
-            int commaIndex = 0;
-            int startIndex = 0;
-            int valueIndex = 0;
-            
             // We're only interested in the first 4 values (0-3)
             float distances[4] = {0, 0, 0, 0};
             
-            // Parse each value
-            while (valueIndex < 4 && startIndex < range_values.length()) {
-                commaIndex = range_values.indexOf(',', startIndex);
-                
-                if (commaIndex == -1) {
-                    // Last value
-                    commaIndex = range_values.length();
+            // Optimization: Parse directly from the original string without creating substrings
+            int startIndex = range_start + 7;  // Skip "range:("
+            int valueIndex = 0;
+            
+            #ifdef DEBUG_MODE
+            SERIAL_LOG.print(F("Range values: "));
+            #endif
+            
+            // Parse each value directly
+            while (valueIndex < 4 && startIndex < range_end) {
+                // Find the next comma or the end parenthesis
+                int commaIndex = data.indexOf(',', startIndex);
+                if (commaIndex == -1 || commaIndex > range_end) {
+                    commaIndex = range_end;
                 }
                 
-                String valueStr = range_values.substring(startIndex, commaIndex);
-                distances[valueIndex] = valueStr.toFloat();
+                // Convert this segment directly to float
+                char buffer[10]; // Temporary buffer for number conversion
+                int len = commaIndex - startIndex;
+                if (len < 10) {
+                    strncpy(buffer, data.c_str() + startIndex, len);
+                    buffer[len] = '\0';
+                    distances[valueIndex] = atof(buffer);
+                }
                 
-                SERIAL_LOG.print(F("Distance "));
-                SERIAL_LOG.print(valueIndex);
-                SERIAL_LOG.print(F(": "));
-                SERIAL_LOG.println(distances[valueIndex]);
+                #ifdef DEBUG_MODE
+                SERIAL_LOG.print(distances[valueIndex]);
+                if (valueIndex < 3) SERIAL_LOG.print(F(", "));
+                #endif
                 
                 valueIndex++;
                 startIndex = commaIndex + 1;
             }
+            
+            #ifdef DEBUG_MODE
+            SERIAL_LOG.println();
+            #endif
             
             // Update our distance variables
             dist_to_a0 = distances[0];
@@ -265,7 +278,7 @@ void parseRangeData(String data) {
     }
 }
 
-// Calculate 2D position using simple triangulation
+// Calculate 2D position using enhanced multilateration with all 4 anchors
 void calculatePosition() {
     // Check if we have valid distances from all 4 anchors
     if (dist_to_a0 <= 0 || dist_to_a1 <= 0 || dist_to_a2 <= 0 || dist_to_a3 <= 0) {
@@ -273,47 +286,103 @@ void calculatePosition() {
         return;
     }
     
-    // Using simple triangulation with three anchors (A0, A1, A2)
-    // This method uses the first three anchors for a simple triangulation calculation
+    // Work directly in cm to avoid unnecessary conversions
+    // This is a non-iterative multilateration approach using all 4 anchors
     
-    // First, convert distances from cm to m to improve numerical stability
-    float r1 = dist_to_a0 / 100.0;  // A0 distance in meters
-    float r2 = dist_to_a1 / 100.0;  // A1 distance in meters
-    float r3 = dist_to_a2 / 100.0;  // A2 distance in meters
+    // We'll calculate 3 separate positions using different triplets of anchors,
+    // then take the weighted average
+    float x1 = 0, y1 = 0;  // Position calculated from anchors 0,1,2
+    float x2 = 0, y2 = 0;  // Position calculated from anchors 0,1,3
+    float x3 = 0, y3 = 0;  // Position calculated from anchors 0,2,3
     
-    // Convert anchor positions to meters
-    float x1 = anchor_x[0] / 100.0;  // A0 x in meters
-    float y1 = anchor_y[0] / 100.0;  // A0 y in meters
-    float x2 = anchor_x[1] / 100.0;  // A1 x in meters
-    float y2 = anchor_y[1] / 100.0;  // A1 y in meters
-    float x3 = anchor_x[2] / 100.0;  // A2 x in meters
-    float y3 = anchor_y[2] / 100.0;  // A2 y in meters
+    // Precompute squared distances and other repeated values
+    float dist_to_a0_sq = dist_to_a0 * dist_to_a0;
+    float dist_to_a1_sq = dist_to_a1 * dist_to_a1;
+    float dist_to_a2_sq = dist_to_a2 * dist_to_a2;
+    float dist_to_a3_sq = dist_to_a3 * dist_to_a3;
     
-    // Calculate intermediate values for triangulation
-    float A = 2 * (x2 - x1);
-    float B = 2 * (y2 - y1);
-    float C = r1 * r1 - r2 * r2 - x1 * x1 + x2 * x2 - y1 * y1 + y2 * y2;
-    float D = 2 * (x3 - x2);
-    float E = 2 * (y3 - y2);
-    float F = r2 * r2 - r3 * r3 - x2 * x2 + x3 * x3 - y2 * y2 + y3 * y3;
+    // Precompute anchor position terms
+    float a0_sq = anchor_x[0] * anchor_x[0] + anchor_y[0] * anchor_y[0];
+    float a1_sq = anchor_x[1] * anchor_x[1] + anchor_y[1] * anchor_y[1];
+    float a2_sq = anchor_x[2] * anchor_x[2] + anchor_y[2] * anchor_y[2];
+    float a3_sq = anchor_x[3] * anchor_x[3] + anchor_y[3] * anchor_y[3];
     
-    // Calculate position (in meters)
-    float x = 0.0, y = 0.0;
+    // Common calculations for equations involving anchors 0-1
+    float A_01 = 2 * (anchor_x[1] - anchor_x[0]);
+    float B_01 = 2 * (anchor_y[1] - anchor_y[0]);
+    float C_01 = dist_to_a0_sq - dist_to_a1_sq - a0_sq + a1_sq;
     
-    // Check if we can solve the system
-    float denominator = (A * E - B * D);
-    if (abs(denominator) < 0.000001) {
-        SERIAL_LOG.println(F("Cannot calculate position - anchors are colinear"));
+    // Common calculations for other anchor pairs
+    float A_12 = 2 * (anchor_x[2] - anchor_x[1]);
+    float B_12 = 2 * (anchor_y[2] - anchor_y[1]);
+    float C_12 = dist_to_a1_sq - dist_to_a2_sq - a1_sq + a2_sq;
+    
+    float A_13 = 2 * (anchor_x[3] - anchor_x[1]);
+    float B_13 = 2 * (anchor_y[3] - anchor_y[1]);
+    float C_13 = dist_to_a1_sq - dist_to_a3_sq - a1_sq + a3_sq;
+    
+    float A_02 = 2 * (anchor_x[2] - anchor_x[0]);
+    float B_02 = 2 * (anchor_y[2] - anchor_y[0]);
+    float C_02 = dist_to_a0_sq - dist_to_a2_sq - a0_sq + a2_sq;
+    
+    float A_23 = 2 * (anchor_x[3] - anchor_x[2]);
+    float B_23 = 2 * (anchor_y[3] - anchor_y[2]);
+    float C_23 = dist_to_a2_sq - dist_to_a3_sq - a2_sq + a3_sq;
+    
+    // Solve using anchors 0,1,2
+    float den1 = (A_01 * B_12 - B_01 * A_12);
+    if (abs(den1) > 0.000001) {
+        x1 = (C_01 * B_12 - C_12 * B_01) / den1;
+        y1 = (A_01 * C_12 - C_01 * A_12) / den1;
+    }
+    
+    // Solve using anchors 0,1,3
+    float den2 = (A_01 * B_13 - B_01 * A_13);
+    if (abs(den2) > 0.000001) {
+        x2 = (C_01 * B_13 - C_13 * B_01) / den2;
+        y2 = (A_01 * C_13 - C_01 * A_13) / den2;
+    }
+    
+    // Solve using anchors 0,2,3
+    float den3 = (A_02 * B_23 - B_02 * A_23);
+    if (abs(den3) > 0.000001) {
+        x3 = (C_02 * B_23 - C_23 * B_02) / den3;
+        y3 = (A_02 * C_23 - C_02 * A_23) / den3;
+    }
+    
+    // Count valid solutions
+    int validSolutions = 0;
+    if (abs(den1) > 0.000001) validSolutions++;
+    if (abs(den2) > 0.000001) validSolutions++;
+    if (abs(den3) > 0.000001) validSolutions++;
+    
+    if (validSolutions == 0) {
+        SERIAL_LOG.println(F("Cannot calculate position - no valid solutions"));
         return;
     }
     
-    // Solve for position
-    x = (C * E - F * B) / denominator;
-    y = (A * F - C * D) / denominator;
+    // Calculate position as average of valid solutions
+    float x = 0.0, y = 0.0;
     
-    // Convert back to cm and store the raw calculated position
-    float rawX = x * 100.0;
-    float rawY = y * 100.0;
+    if (abs(den1) > 0.000001) {
+        x += x1;
+        y += y1;
+    }
+    if (abs(den2) > 0.000001) {
+        x += x2;
+        y += y2;
+    }
+    if (abs(den3) > 0.000001) {
+        x += x3;
+        y += y3;
+    }
+    
+    x /= validSolutions;
+    y /= validSolutions;
+    
+    // Store the raw calculated position
+    float rawX = x;
+    float rawY = y;
     
     // Filter out negative values or values outside the boundary
     if (rawX < 0 || rawY < 0 || rawX > anchor_x[2] || rawY > anchor_y[1]) {
@@ -370,7 +439,23 @@ void tagResponse(float x, float y) {
     // - Detect proximity to points of interest
 }
 
+// Helper function to display anchor distances
+void displayAnchorDistance(int x, int y, int anchorNum, float distance) {
+    display.setCursor(x, y);
+    display.print(F("A"));
+    display.print(anchorNum);
+    display.print(F(": "));
+    if (distance > 0) {
+        display.print(distance, 1);
+    } else {
+        display.print(F("---"));
+    }
+}
+
 // Update the display with the latest distance measurements and position
+// Optimization: Add debug mode definition at top of file (if not already present)
+// Add this near the top of the file: #define DEBUG_MODE  // Comment out to disable debug logging
+
 void updateDistanceDisplay() {
     if (!display_initialized) {
         return;
@@ -386,38 +471,13 @@ void updateDistanceDisplay() {
     display.drawLine(0, 9, 128, 9, SSD1306_WHITE);
     
     // Display distance to A0 and A1
-    display.setCursor(0, 12);
-    display.print(F("A0: "));
-    if (dist_to_a0 > 0) {
-        display.print(dist_to_a0, 1);
-    } else {
-        display.print(F("---"));
-    }
-    
-    display.setCursor(64, 12);
-    display.print(F("A1: "));
-    if (dist_to_a1 > 0) {
-        display.print(dist_to_a1, 1);
-    } else {
-        display.print(F("---"));
-    }
+    // Optimization: Create a helper function to reduce repeated code patterns
+    displayAnchorDistance(0, 12, 0, dist_to_a0);
+    displayAnchorDistance(64, 12, 1, dist_to_a1);
     
     // Display distance to A2 and A3
-    display.setCursor(0, 24);
-    display.print(F("A2: "));
-    if (dist_to_a2 > 0) {
-        display.print(dist_to_a2, 1);
-    } else {
-        display.print(F("---"));
-    }
-    
-    display.setCursor(64, 24);
-    display.print(F("A3: "));
-    if (dist_to_a3 > 0) {
-        display.print(dist_to_a3, 1);
-    } else {
-        display.print(F("---"));
-    }
+    displayAnchorDistance(0, 24, 2, dist_to_a2);
+    displayAnchorDistance(64, 24, 3, dist_to_a3);
     
     // Display divider
     display.drawLine(0, 35, 128, 35, SSD1306_WHITE);
@@ -440,7 +500,9 @@ void updateDistanceDisplay() {
 // Send command to the UWB module and get response
 String sendData(String command, const int timeout, boolean debug)
 {
-    String response = "";
+    // Optimization: Preallocate response string with estimated size
+    String response;
+    response.reserve(64);  // Reserve space for typical response size
 
     if (debug) {
         SERIAL_LOG.print(F("CMD: "));
@@ -449,10 +511,12 @@ String sendData(String command, const int timeout, boolean debug)
     
     SERIAL_AT.println(command);
 
-    long int time = millis();
+    unsigned long time = millis();  // Use unsigned for time comparisons
 
-    while ((time + timeout) > millis())
+    // Read until timeout
+    while ((millis() - time) < timeout)  // More efficient time comparison
     {
+        // Read available bytes in chunks for efficiency
         while (SERIAL_AT.available())
         {
             char c = SERIAL_AT.read();
