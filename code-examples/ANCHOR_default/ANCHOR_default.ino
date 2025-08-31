@@ -83,6 +83,7 @@ void setup()
 long int runtime = 0;
 
 String response = "";
+String rec_head = "AT+RANGE";
 
 void loop()
 {
@@ -100,7 +101,22 @@ void loop()
             continue;
         else if (c == '\n' || c == '\r')
         {
-            SERIAL_LOG.println(response);
+            if (response.indexOf(rec_head) != -1)
+            {
+
+                range_analy(response);
+
+                // Serial.println("-----------Get range msg-----------");
+
+                // String result = response.substring(response.indexOf(rec_head) + rec_head.length());
+
+                // Serial.println(result);
+                // Serial.println("-----------Over-----------");
+            }
+            else
+            {
+                SERIAL_LOG.println(response);
+            }
 
             response = "";
         }
@@ -210,4 +226,50 @@ String cap_cmd()
     temp = temp + ",1";
 
     return temp;
+}
+
+void range_analy(String data)
+{
+    String id_str = data.substring(data.indexOf("tid:") + 4, data.indexOf(",mask:"));
+    String range_str = data.substring(data.indexOf("range:"), data.indexOf(",rssi:"));
+    String rssi_str = data.substring(data.indexOf("rssi:"));
+
+    int range_list[8];
+    double rssi_list[8];
+    int count = 0;
+
+    count = sscanf(range_str.c_str(), "range:(%d,%d,%d,%d,%d,%d,%d,%d)",
+                   &range_list[0], &range_list[1], &range_list[2], &range_list[3],
+                   &range_list[4], &range_list[5], &range_list[6], &range_list[7]);
+
+    if (count != 8)
+    {
+        SERIAL_LOG.println("RANGE ANALY ERROR");
+        SERIAL_LOG.println(count);
+        return;
+    }
+
+    count = sscanf(rssi_str.c_str(), "rssi:(%lf,%lf,%lf,%lf,%lf,%lf,%lf,%lf)",
+                   &rssi_list[0], &rssi_list[1], &rssi_list[2], &rssi_list[3],
+                   &rssi_list[4], &rssi_list[5], &rssi_list[6], &rssi_list[7]);
+
+    if (count != 8)
+    {
+        SERIAL_LOG.println("RSSI ANALY ERROR");
+        SERIAL_LOG.println(count);
+        return;
+    }
+
+    String json_str = "";
+    json_str = json_str + "{\"id\":" + id_str + ",";
+    json_str = json_str + "\"range\":[";
+    for (int i = 0; i < 8; i++)
+    {
+        if (i != 7)
+            json_str = json_str + range_list[i] + ",";
+        else
+            json_str = json_str + range_list[i] + "]}";
+    }
+
+    SERIAL_LOG.println(json_str);
 }
